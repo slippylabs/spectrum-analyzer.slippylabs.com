@@ -1,0 +1,366 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Audio Spectrum Analyzer // spectrum-analyzer.slippylabs.com</title>
+<meta name="description" content="Real-time audio spectrum, waveform and spectrogram from your microphone or an audio file, with peak frequency and note detection. Runs entirely in the browser.">
+<link rel="icon" href="data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2064%2064%22%3E%3Ccircle%20cx%3D%2232%22%20cy%3D%2234%22%20r%3D%2222%22%20fill%3D%22%231c8a52%22%20stroke%3D%22%2339ff8f%22%20stroke-width%3D%222%22%2F%3E%3Ccircle%20cx%3D%2220%22%20cy%3D%2216%22%20r%3D%228%22%20fill%3D%22%231c8a52%22%20stroke%3D%22%2339ff8f%22%20stroke-width%3D%222%22%2F%3E%3Ccircle%20cx%3D%2244%22%20cy%3D%2216%22%20r%3D%228%22%20fill%3D%22%231c8a52%22%20stroke%3D%22%2339ff8f%22%20stroke-width%3D%222%22%2F%3E%3C%2Fsvg%3E">
+<meta name="theme-color" content="#050b10">
+<link rel="stylesheet" href="style.css?v=5">
+</head>
+<body>
+
+<div class="starfield"></div>
+<div class="scanlines"></div>
+
+<main class="page-wrap">
+  <div class="hud-panel wide">
+    <div class="corner tl"></div>
+    <div class="corner tr"></div>
+    <div class="corner bl"></div>
+    <div class="corner br"></div>
+
+    <div class="callsign-row">
+      <div class="toad-avatar-wrap">
+        <svg class="toad-avatar" width="46" height="46" viewBox="0 0 64 64">
+          <circle cx="32" cy="34" r="22" fill="#1c8a52" stroke="#39ff8f" stroke-width="2"/>
+          <circle cx="20" cy="16" r="8" fill="#1c8a52" stroke="#39ff8f" stroke-width="2"/>
+          <circle cx="44" cy="16" r="8" fill="#1c8a52" stroke="#39ff8f" stroke-width="2"/>
+          <circle cx="20" cy="16" r="3.5" fill="#050b10"/>
+          <circle cx="44" cy="16" r="3.5" fill="#050b10"/>
+          <ellipse cx="24" cy="32" rx="4.5" ry="5.5" fill="#050b10"/>
+          <ellipse cx="40" cy="32" rx="4.5" ry="5.5" fill="#050b10"/>
+          <circle cx="24" cy="30" r="1.4" fill="#39ff8f"/>
+          <circle cx="40" cy="30" r="1.4" fill="#39ff8f"/>
+          <path d="M22 42 Q32 48 42 42" stroke="#050b10" stroke-width="2" fill="none" stroke-linecap="round"/>
+        </svg>
+        <div class="lock-reticle"></div>
+      </div>
+      <span class="callsign">Workshop Division // Tool</span>
+      <div class="nav-links">
+        <a href="https://projects.slippylabs.com/" class="logout-link">&larr; Archive</a>
+      </div>
+    </div>
+
+    <h1>SPECTRUM ANALYZER</h1>
+    <p class="subtitle">Watch sound as it happens. Feed it your microphone or an audio file and see the frequency spectrum, the raw waveform, or a scrolling spectrogram.</p>
+
+    <div class="tool-controls">
+      <button class="tool-btn" id="mic-btn">Use Microphone</button>
+      <input class="tool-file-input" id="audio-file" type="file" accept="audio/*">
+      <button class="tool-btn ghost" id="stop-btn">Stop</button>
+    </div>
+
+    <audio id="audio-el" class="hidden" controls style="width:100%;margin-bottom:14px"></audio>
+
+    <p class="tool-output" id="status-line" style="min-height:auto">Idle &mdash; pick the microphone or load an audio file to start.</p>
+
+    <div class="filter-bar" id="view-tabs" style="margin-top:18px">
+      <button class="hud-tab active" data-view="bars">Spectrum</button>
+      <button class="hud-tab" data-view="wave">Waveform</button>
+      <button class="hud-tab" data-view="spectrogram">Spectrogram</button>
+    </div>
+
+    <canvas class="viz-canvas" id="viz"></canvas>
+
+    <div class="stat-grid">
+      <div class="stat-tile"><span class="stat-value" id="stat-peak">&mdash;</span><span class="stat-label">Peak Freq</span></div>
+      <div class="stat-tile"><span class="stat-value" id="stat-note">&mdash;</span><span class="stat-label">Nearest Note</span></div>
+      <div class="stat-tile"><span class="stat-value" id="stat-level">&mdash;</span><span class="stat-label">Level</span></div>
+      <div class="stat-tile"><span class="stat-value" id="stat-rate">&mdash;</span><span class="stat-label">Sample Rate</span></div>
+    </div>
+
+    <div class="tool-controls">
+      <label class="tool-field-label" for="fft-select">FFT size</label>
+      <select class="tool-select" id="fft-select">
+        <option value="512">512</option>
+        <option value="1024">1024</option>
+        <option value="2048" selected>2048</option>
+        <option value="4096">4096</option>
+        <option value="8192">8192</option>
+      </select>
+      <label class="tool-check"><input type="checkbox" id="log-check" checked> Logarithmic frequency axis</label>
+    </div>
+
+    <div class="tool-field-row">
+      <label class="tool-field-label" for="smooth-slider">Smoothing &mdash; <span id="smooth-label">0.80</span></label>
+      <div class="tool-slider-row">
+        <input type="range" id="smooth-slider" min="0" max="95" value="80">
+      </div>
+    </div>
+
+    <p class="tool-note">Microphone audio is analysed and drawn locally &mdash; it is never recorded, saved or sent anywhere, and it is deliberately not routed to your speakers so it cannot feed back. Peak detection uses the loudest FFT bin, so its resolution is the sample rate divided by the FFT size: bigger FFT means finer pitch, slower response.</p>
+
+    <div class="comm-window">
+      <div class="comm-portrait">
+        <svg width="36" height="36" viewBox="0 0 64 64">
+          <circle cx="32" cy="34" r="22" fill="#1c8a52" stroke="#39ff8f" stroke-width="2"/>
+          <circle cx="20" cy="16" r="8" fill="#1c8a52" stroke="#39ff8f" stroke-width="2"/>
+          <circle cx="44" cy="16" r="8" fill="#1c8a52" stroke="#39ff8f" stroke-width="2"/>
+          <circle cx="20" cy="16" r="3.5" fill="#050b10"/>
+          <circle cx="44" cy="16" r="3.5" fill="#050b10"/>
+          <ellipse cx="24" cy="32" rx="4.5" ry="5.5" fill="#050b10"/>
+          <ellipse cx="40" cy="32" rx="4.5" ry="5.5" fill="#050b10"/>
+          <circle cx="24" cy="30" r="1.4" fill="#39ff8f"/>
+          <circle cx="40" cy="30" r="1.4" fill="#39ff8f"/>
+          <path d="M22 42 Q32 48 42 42" stroke="#050b10" stroke-width="2" fill="none" stroke-linecap="round"/>
+        </svg>
+      </div>
+      <div class="comm-body">
+        <div class="comm-label"><span class="dot"></span> Incoming Transmission &mdash; Slippy</div>
+        <p>"Everything you hear is just air changing its mind very quickly."</p>
+      </div>
+    </div>
+
+    <a href="https://projects.slippylabs.com/" class="hud-btn">&larr; Back to Archive</a>
+  </div>
+</main>
+
+<script>
+const NOTE_NAMES = ['C', 'C♯', 'D', 'D♯', 'E', 'F', 'F♯', 'G', 'G♯', 'A', 'A♯', 'B'];
+
+const canvas = document.getElementById('viz');
+const ctx = canvas.getContext('2d');
+const statusLine = document.getElementById('status-line');
+const audioEl = document.getElementById('audio-el');
+const viewTabs = document.getElementById('view-tabs');
+const fftSelect = document.getElementById('fft-select');
+const smoothSlider = document.getElementById('smooth-slider');
+const logCheck = document.getElementById('log-check');
+
+let audioCtx = null;
+let analyser = null;
+let sourceNode = null;
+let micStream = null;
+let rafId = null;
+let view = 'bars';
+let freqData = null;
+let timeData = null;
+
+// Spectrogram history lives on its own canvas so it can be scrolled cheaply.
+const spec = document.createElement('canvas');
+const sctx = spec.getContext('2d');
+
+function setStatus(text, isError) {
+  statusLine.textContent = text;
+  statusLine.classList.toggle('error-text', !!isError);
+}
+
+function sizeCanvas() {
+  const ratio = window.devicePixelRatio || 1;
+  const cssW = canvas.clientWidth || 600;
+  const cssH = canvas.clientHeight || 220;
+  canvas.width = Math.round(cssW * ratio);
+  canvas.height = Math.round(cssH * ratio);
+  if (spec.width !== canvas.width || spec.height !== canvas.height) {
+    spec.width = canvas.width;
+    spec.height = canvas.height;
+    sctx.fillStyle = '#050b10';
+    sctx.fillRect(0, 0, spec.width, spec.height);
+  }
+}
+
+function ensureContext() {
+  if (!audioCtx) {
+    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    analyser = audioCtx.createAnalyser();
+    applyAnalyserSettings();
+  }
+  if (audioCtx.state === 'suspended') audioCtx.resume();
+  return audioCtx;
+}
+
+function applyAnalyserSettings() {
+  if (!analyser) return;
+  analyser.fftSize = parseInt(fftSelect.value, 10);
+  analyser.smoothingTimeConstant = parseInt(smoothSlider.value, 10) / 100;
+  freqData = new Uint8Array(analyser.frequencyBinCount);
+  timeData = new Uint8Array(analyser.fftSize);
+}
+
+function disconnectSource() {
+  if (sourceNode) { try { sourceNode.disconnect(); } catch (e) {} sourceNode = null; }
+  if (micStream) { micStream.getTracks().forEach(t => t.stop()); micStream = null; }
+  if (!audioEl.paused) audioEl.pause();
+}
+
+async function startMic() {
+  try {
+    ensureContext();
+    disconnectSource();
+    audioEl.classList.add('hidden');
+    micStream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false } });
+    sourceNode = audioCtx.createMediaStreamSource(micStream);
+    // Deliberately NOT connected to destination — that would be a feedback loop.
+    sourceNode.connect(analyser);
+    setStatus('Listening on the microphone. Nothing is being recorded.');
+    startLoop();
+  } catch (err) {
+    setStatus('Microphone unavailable: ' + err.message, true);
+  }
+}
+
+function startFile(file) {
+  ensureContext();
+  disconnectSource();
+  audioEl.classList.remove('hidden');
+  audioEl.src = URL.createObjectURL(file);
+  // A media element can only ever be wired to one MediaElementSource, so reuse it.
+  if (!audioEl._node) audioEl._node = audioCtx.createMediaElementSource(audioEl);
+  sourceNode = audioEl._node;
+  sourceNode.connect(analyser);
+  analyser.connect(audioCtx.destination);
+  audioEl.play();
+  setStatus('Playing ' + file.name);
+  startLoop();
+}
+
+function stopAll() {
+  disconnectSource();
+  if (rafId) { cancelAnimationFrame(rafId); rafId = null; }
+  setStatus('Stopped.');
+}
+
+function frequencyToNote(freq) {
+  if (!freq || freq < 20) return '—';
+  const midi = Math.round(12 * Math.log2(freq / 440) + 69);
+  if (midi < 0 || midi > 127) return '—';
+  return NOTE_NAMES[((midi % 12) + 12) % 12] + (Math.floor(midi / 12) - 1);
+}
+
+function drawBars(w, h) {
+  const bins = analyser.frequencyBinCount;
+  const nyquist = audioCtx.sampleRate / 2;
+  const useLog = logCheck.checked;
+  const barCount = Math.min(160, Math.floor(w / 4));
+  const barW = w / barCount;
+
+  for (let i = 0; i < barCount; i++) {
+    let lo, hi;
+    if (useLog) {
+      const minF = 20;
+      lo = Math.floor(minF * Math.pow(nyquist / minF, i / barCount) / nyquist * bins);
+      hi = Math.floor(minF * Math.pow(nyquist / minF, (i + 1) / barCount) / nyquist * bins);
+    } else {
+      lo = Math.floor((i / barCount) * bins);
+      hi = Math.floor(((i + 1) / barCount) * bins);
+    }
+    if (hi <= lo) hi = lo + 1;
+    let peak = 0;
+    for (let b = lo; b < hi && b < bins; b++) if (freqData[b] > peak) peak = freqData[b];
+
+    const mag = peak / 255;
+    const barH = mag * (h - 4);
+    // Green through orange as the bar climbs — matches the site's HUD palette.
+    ctx.fillStyle = mag > 0.85 ? '#ff4655' : mag > 0.6 ? '#ff9130' : '#39ff8f';
+    ctx.globalAlpha = 0.25 + mag * 0.75;
+    ctx.fillRect(i * barW, h - barH, Math.max(1, barW - 1), barH);
+  }
+  ctx.globalAlpha = 1;
+}
+
+function drawWave(w, h) {
+  ctx.strokeStyle = '#39ff8f';
+  ctx.lineWidth = Math.max(1, (window.devicePixelRatio || 1));
+  ctx.beginPath();
+  const step = w / timeData.length;
+  for (let i = 0; i < timeData.length; i++) {
+    const y = (1 - timeData[i] / 255) * h;
+    if (i === 0) ctx.moveTo(0, y); else ctx.lineTo(i * step, y);
+  }
+  ctx.stroke();
+
+  ctx.strokeStyle = 'rgba(57,255,143,0.18)';
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(0, h / 2); ctx.lineTo(w, h / 2);
+  ctx.stroke();
+}
+
+function drawSpectrogram(w, h) {
+  // Scroll the history one pixel left, then paint the newest column on the right.
+  sctx.drawImage(spec, -1, 0);
+  const bins = analyser.frequencyBinCount;
+  for (let y = 0; y < h; y++) {
+    const t = 1 - y / h;
+    const bin = Math.min(bins - 1, Math.floor(20 * Math.pow((audioCtx.sampleRate / 2) / 20, t) / (audioCtx.sampleRate / 2) * bins));
+    const v = freqData[bin] / 255;
+    const r = v > 0.75 ? Math.round((v - 0.75) * 4 * 255) : 0;
+    sctx.fillStyle = 'rgb(' + r + ',' + Math.round(v * 255) + ',' + Math.round(v * 143) + ')';
+    sctx.fillRect(w - 1, y, 1, 1);
+  }
+  ctx.drawImage(spec, 0, 0);
+}
+
+function updateStats() {
+  const bins = analyser.frequencyBinCount;
+  let peakBin = 0, peakVal = 0, sum = 0;
+  for (let i = 0; i < bins; i++) {
+    if (freqData[i] > peakVal) { peakVal = freqData[i]; peakBin = i; }
+  }
+  for (let i = 0; i < timeData.length; i++) {
+    const v = timeData[i] / 128 - 1;
+    sum += v * v;
+  }
+  const rms = Math.sqrt(sum / timeData.length);
+  const binHz = audioCtx.sampleRate / analyser.fftSize;
+  const peakHz = peakVal > 8 ? peakBin * binHz : 0;
+
+  document.getElementById('stat-peak').textContent = peakHz ? Math.round(peakHz) + ' Hz' : '—';
+  document.getElementById('stat-note').textContent = frequencyToNote(peakHz);
+  document.getElementById('stat-level').textContent = rms > 0.0005 ? Math.round(20 * Math.log10(rms)) + ' dB' : '—';
+  document.getElementById('stat-rate').textContent = Math.round(audioCtx.sampleRate / 100) / 10 + ' kHz';
+}
+
+function frame() {
+  rafId = requestAnimationFrame(frame);
+  if (!analyser) return;
+  sizeCanvas();
+  const w = canvas.width, h = canvas.height;
+
+  analyser.getByteFrequencyData(freqData);
+  analyser.getByteTimeDomainData(timeData);
+
+  ctx.fillStyle = '#050b10';
+  ctx.fillRect(0, 0, w, h);
+
+  if (view === 'bars') drawBars(w, h);
+  else if (view === 'wave') drawWave(w, h);
+  else drawSpectrogram(w, h);
+
+  updateStats();
+}
+
+function startLoop() {
+  if (!rafId) frame();
+}
+
+viewTabs.addEventListener('click', (e) => {
+  const btn = e.target.closest('.hud-tab');
+  if (!btn) return;
+  viewTabs.querySelectorAll('.hud-tab').forEach(t => t.classList.remove('active'));
+  btn.classList.add('active');
+  view = btn.dataset.view;
+});
+
+fftSelect.addEventListener('change', applyAnalyserSettings);
+smoothSlider.addEventListener('input', () => {
+  document.getElementById('smooth-label').textContent = (parseInt(smoothSlider.value, 10) / 100).toFixed(2);
+  applyAnalyserSettings();
+});
+
+document.getElementById('mic-btn').addEventListener('click', startMic);
+document.getElementById('stop-btn').addEventListener('click', stopAll);
+document.getElementById('audio-file').addEventListener('change', (e) => {
+  const file = e.target.files && e.target.files[0];
+  if (file) startFile(file);
+});
+
+sizeCanvas();
+ctx.fillStyle = '#050b10';
+ctx.fillRect(0, 0, canvas.width, canvas.height);
+window.addEventListener('resize', sizeCanvas);
+</script>
+</body>
+</html>
