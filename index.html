@@ -63,9 +63,15 @@
       <button class="tool-btn ghost" id="stop-btn">Stop</button>
     </div>
 
+    <div class="tool-controls hidden" id="device-row">
+      <label class="tool-field-label" for="mic-select">Input device</label>
+      <select class="tool-select" id="mic-select"></select>
+    </div>
+
     <audio id="audio-el" class="hidden" controls style="width:100%;margin-bottom:14px"></audio>
 
     <p class="tool-output" id="status-line" style="min-height:auto">Idle &mdash; pick the microphone or load an audio file to start.</p>
+    <p class="tool-note" id="signal-line" style="margin:8px 0 0"></p>
 
     <div class="filter-bar" id="view-tabs" style="margin-top:18px">
       <button class="hud-tab active" data-view="bars">Spectrum</button>
@@ -134,6 +140,9 @@ const NOTE_NAMES = ['C', 'C♯', 'D', 'D♯', 'E', 'F', 'F♯', 'G', 'G♯', 'A'
 const canvas = document.getElementById('viz');
 const ctx = canvas.getContext('2d');
 const statusLine = document.getElementById('status-line');
+const signalLine = document.getElementById('signal-line');
+const deviceRow = document.getElementById('device-row');
+const micSelect = document.getElementById('mic-select');
 const audioEl = document.getElementById('audio-el');
 const viewTabs = document.getElementById('view-tabs');
 const fftSelect = document.getElementById('fft-select');
@@ -148,6 +157,8 @@ let rafId = null;
 let view = 'bars';
 let freqData = null;
 let timeData = null;
+let silentSince = 0;
+let activeTrack = null;
 
 // Spectrogram history lives on its own canvas so it can be scrolled cheaply.
 const spec = document.createElement('canvas');
@@ -156,6 +167,10 @@ const sctx = spec.getContext('2d');
 function setStatus(text, isError) {
   statusLine.textContent = text;
   statusLine.classList.toggle('error-text', !!isError);
+}
+
+function setSignal(text) {
+  signalLine.textContent = text || '';
 }
 
 function sizeCanvas() {
@@ -192,23 +207,102 @@ function applyAnalyserSettings() {
 
 function disconnectSource() {
   if (sourceNode) { try { sourceNode.disconnect(); } catch (e) {} sourceNode = null; }
+  if (activeTrack) { activeTrack.onmute = activeTrack.onunmute = activeTrack.onended = null; activeTrack = null; }
   if (micStream) { micStream.getTracks().forEach(t => t.stop()); micStream = null; }
+  silentSince = 0;
+  setSignal('');
   if (!audioEl.paused) audioEl.pause();
 }
 
-async function startMic() {
+// getUserMedia rejects with a handful of well-defined names; each one means something
+// quite different, and "check the console" is not an answer for anyone using this page.
+function micErrorMessage(err) {
+  switch (err && err.name) {
+    case 'NotAllowedError':
+    case 'SecurityError':
+      return 'Microphone blocked by the browser. Click the padlock (or the mic/camera icon) at the left of the address bar, set Microphone to Allow for this site, then reload and try again. On macOS also check System Settings → Privacy & Security → Microphone for your browser.';
+    case 'NotFoundError':
+    case 'DevicesNotFoundError':
+      return 'No microphone found. The browser cannot see any audio input at all — plug one in or enable it in your system sound settings, then reload.';
+    case 'NotReadableError':
+    case 'TrackStartError':
+      return 'The microphone is busy. Another app or tab has it open exclusively — close that (calls, recorders, other tools on this site), then try again.';
+    case 'NotSupportedError':
+      return 'This browser refused the request outright. That normally means the page is not being served over https, or you are inside an in-app browser (a link opened from a chat app) that never allows the microphone — open https://spectrum-analyzer.slippylabs.com in Chrome, Firefox or Safari directly.';
+    case 'AbortError':
+      return 'The browser could not start the microphone. Unplugging and replugging the device, or reloading the page, usually clears this.';
+    default:
+      return 'Microphone unavailable: ' + (err && (err.message || err.name) || err);
+  }
+}
+
+async function requestMic(deviceId) {
+  // The three processing switches and an exact device id are preferences, not requirements —
+  // some drivers reject them outright, so fall back to a plain request instead of giving up.
+  const wanted = { echoCancellation: false, noiseSuppression: false, autoGainControl: false };
+  if (deviceId) wanted.deviceId = { exact: deviceId };
+  try {
+    return await navigator.mediaDevices.getUserMedia({ audio: wanted });
+  } catch (err) {
+    if (err && (err.name === 'OverconstrainedError' || err.name === 'TypeError' || err.name === 'NotReadableError')) {
+      return await navigator.mediaDevices.getUserMedia({ audio: true });
+    }
+    throw err;
+  }
+}
+
+async function refreshDevices() {
+  if (!navigator.mediaDevices || !navigator.mediaDevices.enumerateDevices) return;
+  let devices;
+  try { devices = await navigator.mediaDevices.enumerateDevices(); } catch (e) { return; }
+  const inputs = devices.filter(d => d.kind === 'audioinput');
+  if (!inputs.length) return;
+  const current = activeTrack && activeTrack.getSettings ? activeTrack.getSettings().deviceId : '';
+  micSelect.innerHTML = '';
+  inputs.forEach((d, i) => {
+    const opt = document.createElement('option');
+    opt.value = d.deviceId;
+    // Labels are blank until permission is granted, so fall back to a number.
+    opt.textContent = d.label || ('Input ' + (i + 1));
+    micSelect.appendChild(opt);
+  });
+  if (current) micSelect.value = current;
+  deviceRow.classList.remove('hidden');
+}
+
+function watchTrack(track) {
+  activeTrack = track || null;
+  if (!activeTrack) return;
+  activeTrack.onmute = () => setSignal('The input is muted at the system level — unmute it (or pick another device above) and the trace will come back.');
+  activeTrack.onunmute = () => setSignal('');
+  activeTrack.onended = () => setStatus('The microphone was disconnected. Pick an input above and hit Use Microphone again.', true);
+}
+
+async function startMic(deviceId) {
+  if (!window.isSecureContext || !navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+    setStatus('This browser will not release the microphone here. Microphone access needs a secure page — check the address bar reads https://spectrum-analyzer.slippylabs.com, and note that private/embedded browsers (in-app webviews from chat apps) often block it entirely.', true);
+    return;
+  }
+  setStatus('Asking for microphone access — accept the browser prompt if it appears.');
+  setSignal('');
   try {
     ensureContext();
     disconnectSource();
     audioEl.classList.add('hidden');
-    micStream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false } });
+    micStream = await requestMic(deviceId || micSelect.value || null);
+    // Chrome can park the context while the permission prompt is up.
+    if (audioCtx.state !== 'running') await audioCtx.resume();
     sourceNode = audioCtx.createMediaStreamSource(micStream);
     // Deliberately NOT connected to destination — that would be a feedback loop.
     sourceNode.connect(analyser);
-    setStatus('Listening on the microphone. Nothing is being recorded.');
+    const track = micStream.getAudioTracks()[0];
+    watchTrack(track);
+    setStatus('Listening on ' + (track && track.label ? '“' + track.label + '”' : 'the microphone') + '. Nothing is being recorded.');
+    silentSince = performance.now();
+    await refreshDevices();
     startLoop();
   } catch (err) {
-    setStatus('Microphone unavailable: ' + err.message, true);
+    setStatus(micErrorMessage(err), true);
   }
 }
 
@@ -322,6 +416,23 @@ function updateStats() {
   document.getElementById('stat-note').textContent = frequencyToNote(peakHz);
   document.getElementById('stat-level').textContent = rms > 0.0005 ? Math.round(20 * Math.log10(rms)) + ' dB' : '—';
   document.getElementById('stat-rate').textContent = Math.round(audioCtx.sampleRate / 100) / 10 + ' kHz';
+  checkSignal(rms);
+}
+
+// A granted-but-silent stream looks identical to a broken one on the canvas, so say
+// which it is: dead silence for a couple of seconds means the wrong input is selected.
+function checkSignal(rms) {
+  if (!micStream) return;
+  if (activeTrack && activeTrack.muted) return;
+  if (rms > 0.0015) {
+    silentSince = 0;
+    if (signalLine.textContent.startsWith('No signal')) setSignal('');
+    return;
+  }
+  if (!silentSince) silentSince = performance.now();
+  else if (performance.now() - silentSince > 2500) {
+    setSignal('No signal on this input — the browser handed over a microphone but it is dead silent. Usually the wrong device is selected above, or it is muted in your system sound settings. Try another input device.');
+  }
 }
 
 function frame() {
@@ -361,7 +472,11 @@ smoothSlider.addEventListener('input', () => {
   applyAnalyserSettings();
 });
 
-document.getElementById('mic-btn').addEventListener('click', startMic);
+document.getElementById('mic-btn').addEventListener('click', () => startMic());
+micSelect.addEventListener('change', () => { if (micStream) startMic(micSelect.value); });
+if (navigator.mediaDevices && navigator.mediaDevices.addEventListener) {
+  navigator.mediaDevices.addEventListener('devicechange', () => { if (micStream) refreshDevices(); });
+}
 document.getElementById('stop-btn').addEventListener('click', stopAll);
 document.getElementById('audio-file').addEventListener('change', (e) => {
   const file = e.target.files && e.target.files[0];
