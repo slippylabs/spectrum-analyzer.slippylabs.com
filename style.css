@@ -1163,3 +1163,28 @@ mark.regex-match { background: rgba(57, 255, 143, 0.3); color: var(--hud-green);
   cursor: pointer;
 }
 .tool-color-input:focus { outline: none; border-color: var(--hud-green); }
+
+/* ---- spectrum analyzer: phone-sized touch targets ----
+   The desktop controls are 26-33px tall, which is under the ~44px a thumb
+   reliably hits. Bumped only under the phone breakpoint so the desktop
+   layout is untouched. */
+.tool-btn, .hud-tab, .logout-link, .tool-select { touch-action: manipulation; }
+
+@media (max-width: 560px) {
+  .tool-btn { min-height: 44px; padding: 12px 18px; }
+  .hud-tab {
+    min-height: 44px;
+    padding: 10px 12px;
+    flex: 1 1 30%;
+    text-align: center;
+  }
+  .tool-select { min-height: 44px; }
+  .nav-links .logout-link {
+    min-height: 44px;
+    display: inline-flex;
+    align-items: center;
+  }
+  .tool-slider-row input[type="range"] { height: 44px; }
+  .tool-check input { width: 20px; height: 20px; }
+  .viz-canvas { height: 300px; }
+}
